@@ -1,0 +1,51 @@
+# Single-binary Tempo with local storage. Fine for a demo, NOT for production.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+# The metrics-generator derives metrics FROM traces and remote-writes them to Prometheus:
+#   service-graphs -> traces_service_graph_*   (who calls whom, powers the Service Graph view)
+#   span-metrics   -> traces_spanmetrics_*     (RED metrics per span name)
+#   local-blocks   -> enables TraceQL metrics queries ({...} | rate()) in Grafana
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /tmp/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+  traces_storage:
+    path: /tmp/tempo/generator/traces
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /tmp/tempo/wal
+    local:
+      path: /tmp/tempo/blocks
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics, local-blocks]

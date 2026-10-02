@@ -1,0 +1,142 @@
+name: observability-demo
+
+# Shared OpenTelemetry Java agent configuration for both Spring Boot services.
+# Every option of the agent can be set with an OTEL_* env var:
+# https://opentelemetry.io/docs/zero-code/java/agent/configuration/
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: otlp
+  OTEL_LOGS_EXPORTER: otlp
+  # Default is 60s; 5s makes dashboards react quickly while you experiment
+  OTEL_METRIC_EXPORT_INTERVAL: "5000"
+  # Keep every trace (fine for a demo; production usually samples)
+  OTEL_TRACES_SAMPLER: parentbased_always_on
+  OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0
+
+services:
+  # ---------------------------------------------------------------- applications
+  order-service:
+    build: ./services/order-service
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: order-service
+      DB_URL: jdbc:postgresql://postgres:5432/orders
+      DB_USER: demo
+      DB_PASSWORD: demo
+      INVENTORY_URL: http://inventory-service:8081
+    mem_limit: 768m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory-service:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
+  inventory-service:
+    build: ./services/inventory-service
+    ports:
+      - "8081:8081"
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: inventory-service
+    mem_limit: 512m
+    depends_on:
+      - otel-collector
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------- telemetry pipeline
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./infra/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # collector's own metrics
+      - "8889:8889"   # app metrics in Prometheus format (scraped by Prometheus)
+      - "13133:13133" # health check
+      - "55679:55679" # zpages
+    depends_on:
+      - tempo
+      - loki
+
+  # ---------------------------------------------------------------- backends
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver   # Tempo metrics-generator + k6 push here
+      - --enable-feature=exemplar-storage     # keep trace_id exemplars
+      - --web.enable-lifecycle                # allows `curl -X POST :9090/-/reload`
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+    ports:
+      - "9090:9090"
+
+  loki:
+    image: grafana/loki:3.3.2
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./infra/loki/loki.yaml:/etc/loki/loki.yaml:ro
+    ports:
+      - "3100:3100"
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    ports:
+      - "3200:3200"   # Tempo HTTP API (Grafana queries this)
+
+  # ---------------------------------------------------------------- visualization
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/service-overview.json
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,metricsSummary
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+  # ---------------------------------------------------------------- load generator (on demand)
+  # Not started by `docker compose up`; run it with scripts/load.sh
+  k6:
+    image: grafana/k6:0.55.0
+    profiles: ["tools"]
+    volumes:
+      - ./load:/scripts:ro
+    environment:
+      BASE_URL: http://order-service:8080
+      # k6 pushes its own (client-side) metrics into Prometheus -> compare with server-side metrics
+      K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: p(95),p(99),avg,max

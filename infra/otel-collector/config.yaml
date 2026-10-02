@@ -1,0 +1,88 @@
+# OpenTelemetry Collector: the single entry point for ALL telemetry from the apps.
+# Apps speak only OTLP to the collector; the collector decides where each signal goes.
+#
+#   receivers  -> how data gets IN
+#   processors -> what happens to it on the way (batching, enrichment, filtering, sampling...)
+#   exporters  -> where data goes OUT
+#   pipelines  -> wire receivers -> processors -> exporters, per signal (traces / metrics / logs)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Protects the collector from OOM under load: refuses data instead of crashing.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  # Groups data into batches -> fewer, bigger network calls to the backends.
+  batch:
+    send_batch_size: 1024
+    timeout: 2s
+  # Adds/overrides resource attributes on everything passing through.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: local-demo
+        action: upsert
+
+exporters:
+  # Traces -> Tempo (OTLP/gRPC)
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Logs -> Loki's native OTLP endpoint (Loki >= 3.0)
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+  # Metrics -> exposed on :8889/metrics for Prometheus to SCRAPE (pull model)
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # OpenMetrics format is required to expose exemplars (metric -> trace links)
+    enable_open_metrics: true
+    # Turn resource attributes (service.name, service.version...) into labels (service_name, ...)
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Drop series that stopped receiving data (e.g. a stopped service) after this long
+    metric_expiration: 2m
+
+  # Prints a summary of every batch to the collector's stdout: `docker compose logs otel-collector`
+  # Switch to `verbosity: detailed` to see every span / metric / log record.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  # Live debugging pages: http://localhost:55679/debug/tracez and /debug/pipelinez
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/loki, debug]
+
+  # The collector's own health metrics (otelcol_*), scraped by Prometheus on :8888
+  telemetry:
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888

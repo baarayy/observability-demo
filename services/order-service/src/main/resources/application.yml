@@ -1,0 +1,33 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/orders}
+    username: ${DB_USER:demo}
+    password: ${DB_PASSWORD:demo}
+    hikari:
+      pool-name: orders-pool
+      # Deliberately small so the "db-slow" chaos scenario can exhaust the pool
+      maximum-pool-size: 5
+      connection-timeout: 3000
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+inventory:
+  base-url: ${INVENTORY_URL:http://localhost:8081}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  pattern:
+    # trace_id / span_id are put into the MDC by the OTel agent -> every console line is correlatable
+    level: "%5p [trace_id=%X{trace_id:-} span_id=%X{span_id:-}]"

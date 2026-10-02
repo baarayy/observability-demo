@@ -1,0 +1,75 @@
+# Alerting rules are evaluated by Prometheus every `evaluation_interval`.
+# See them at http://localhost:9090/alerts (and in Grafana -> Alerting -> Alert rules).
+# There is no Alertmanager in this demo, so alerts are visible but not routed anywhere.
+
+groups:
+  - name: service-slo
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[1m]))
+            /
+          sum by (service_name) (rate(http_server_request_duration_seconds_count[1m]))
+            > 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service_name }}: more than 5% of requests fail"
+          description: "5xx ratio is {{ $value | humanizePercentage }} over the last minute."
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket[1m]))
+          ) > 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_name }}: p95 latency above 1s"
+          description: "p95 latency is {{ $value | humanizeDuration }}."
+
+      - alert: ServiceNotReporting
+        expr: |
+          absent_over_time(jvm_thread_count{service_name="order-service"}[1m])
+            or
+          absent_over_time(jvm_thread_count{service_name="inventory-service"}[1m])
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "A service stopped sending telemetry (down or pipeline broken)"
+
+  - name: saturation
+    rules:
+      - alert: HighHeapUsage
+        expr: |
+          sum by (service_name) (jvm_memory_used_bytes{jvm_memory_type="heap"})
+            /
+          sum by (service_name) (jvm_memory_limit_bytes{jvm_memory_type="heap"})
+            > 0.8
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_name }}: heap usage above 80%"
+          description: "Heap is {{ $value | humanizePercentage }} full."
+
+      - alert: DbConnectionPoolExhausted
+        expr: sum by (service_name) (db_client_connections_pending_requests) > 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_name }}: threads are waiting for a DB connection"
+
+  - name: telemetry-pipeline
+    rules:
+      - alert: CollectorExportFailures
+        expr: sum by (exporter) (rate(otelcol_exporter_send_failed_spans[5m]) + rate(otelcol_exporter_send_failed_log_records[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OTel Collector failing to export to {{ $labels.exporter }}"
