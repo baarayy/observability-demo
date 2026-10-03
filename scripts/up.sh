@@ -22,6 +22,8 @@ wait_for() {
 
 wait_for grafana           http://localhost:3000/api/health
 wait_for prometheus        http://localhost:9090/-/ready
+wait_for loki              http://localhost:3100/ready
+wait_for tempo             http://localhost:3200/ready
 wait_for otel-collector    http://localhost:13133/
 wait_for inventory-service http://localhost:8081/actuator/health
 wait_for order-service     http://localhost:8080/actuator/health

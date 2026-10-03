@@ -34,8 +34,11 @@ limits_config:
   allow_structured_metadata: true
   volume_enabled: true
 
+# The pattern ingester (Grafana "Logs Drilldown" patterns tab) is left off: in single-binary
+# mode with an in-memory ring it never passes its readiness check, so /ready stays 503 forever.
+# LogQL's `| pattern "..."` parser does NOT need it.
 pattern_ingester:
-  enabled: true
+  enabled: false
 
 analytics:
   reporting_enabled: false
